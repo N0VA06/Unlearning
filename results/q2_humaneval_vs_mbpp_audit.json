@@ -1,0 +1,59 @@
+{
+  "row_overlap": 0,
+  "source_id_overlap": 0,
+  "exact_text_overlap": 0,
+  "normalized_text_overlap": 0,
+  "train_label_set": [
+    1
+  ],
+  "eval_label_set": [
+    0,
+    1
+  ],
+  "forget_in_train": 0,
+  "n_train_target": 18,
+  "n_heldout_target": 73,
+  "n_forget": 91,
+  "sample_train": [
+    [
+      "humaneval",
+      23
+    ],
+    [
+      "humaneval",
+      45
+    ],
+    [
+      "humaneval",
+      34
+    ]
+  ],
+  "sample_eval_heldout": [
+    [
+      "humaneval",
+      53
+    ],
+    [
+      "humaneval",
+      55
+    ],
+    [
+      "humaneval",
+      83
+    ]
+  ],
+  "sample_eval_forget": [
+    [
+      "mbpp",
+      374
+    ],
+    [
+      "mbpp",
+      131
+    ],
+    [
+      "mbpp",
+      17
+    ]
+  ]
+}
