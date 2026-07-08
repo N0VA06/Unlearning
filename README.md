@@ -369,3 +369,4 @@ Typical **length-only AUROC** after matching: ≈ 0.50 ± 0.02 (Q3/Q4); Q1/Q2 ma
 ## Dependencies
 
 See [`requirements.txt`](requirements.txt): `torch`, `transformers`, `peft`, `scikit-learn`, `scipy`, `matplotlib`, `seaborn`, `umap-learn`, `pandas`, `numpy`, `tqdm`. Dataset download additionally uses `datasets` (installed when running `download.py`).
+# Unlearning
