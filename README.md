@@ -12,6 +12,8 @@ This repo implements a diagnostic pipeline that tests two scoring signals — a 
 - [Quick start](#quick-start)
 - [Pipeline overview](#pipeline-overview)
 - [Scoring methods](#scoring-methods)
+- [Overlap estimators (Active-PU pipeline)](#overlap-estimators-active-pu-pipeline)
+- [Active nnPU & full method comparison](#active-nnpu--full-method-comparison)
 - [Code walkthrough](#code-walkthrough)
 - [Example results (Q1 — Math)](#example-results-q1--math)
 - [Cross-quadrant summary](#cross-quadrant-summary)
@@ -113,6 +115,269 @@ Driver: [`experiments/run_identification.py`](experiments/run_identification.py)
 Implementation: [`src/scorer.py`](src/scorer.py). Embedding uses **LoRA GPT-2 hidden states only** — no separate sentence-transformer — so embedding scores and layerwise drift read from the same representation stream.
 
 **Metrics** ([`src/metrics.py`](src/metrics.py)): AUROC, average precision, best F1 (threshold sweep), Kolmogorov–Smirnov statistic, Cohen's d, KDE overlap coefficient, precision@K for K ∈ {10, 25, 50, 100}. Results written to `results/{qid}_{name}_metrics.json`.
+
+---
+
+## Overlap estimators (Active-PU pipeline)
+
+Beyond the two identification signals above, [`src/overlap_scorers.py`](src/overlap_scorers.py) implements **five independent overlap estimators** for the Active Positive-Unlabeled (PU) formulation of target–forget separation. Each maps a text to a single scalar — *how target-like is `x` after LoRA adaptation* — with **no feature fusion**, so the same PU framework can later be run once per estimator and compared fairly.
+
+### Leakage-free three-way split
+
+The classic 20/80 split leaks when the PU **positive set** is the same data the adapter memorised. [`make_pu_split`](src/data_loader.py) partitions the target class three ways:
+
+| Split | Role |
+|-------|------|
+| `lora_train` | adaptation **only** — fits the LoRA adapter |
+| `P` (positives / reference) | labeled positives + embedding centroid; **disjoint** from `lora_train` |
+| `held-out target` | hidden positives, placed in the unlabeled pool `U` |
+
+All forget rows join `U`. Scores are computed on `P ∪ U`, none of which are in `lora_train`, so the adapter never memorised any scored row. Passing `lora_train_keys` (read from an existing checkpoint's `split_info.json` via `load_train_keys`) keeps the split consistent with an already-trained adapter — **no retraining required**.
+
+### Estimators
+
+| Estimator | Statistic (higher ⇒ more target-like) | Needs shadows? |
+|-----------|----------------------------------------|:--:|
+| `ppl_ratio` | mean-token `logp_LoRA(x) − logp_base(x)` | no |
+| `minkpp` | Min-K%++ gap: mean of the calibrated bottom-`MINK_FRAC` token scores `z_t = (logp − μ_t)/σ_t` (vocab mean/std), LoRA minus base | no |
+| `embedding` | `cos(h_LoRA(x), centroid_P)` — centroid built from the `P` reference pool | no |
+| `lira_lite` | ensemble OUT-shadow benefit `mean_{s: x∉train(s)} (base_nll − shadow_nll)` — a variance-reduced PPL ratio | yes |
+| `lira_full` | OUT-calibrated Gaussian gap `(s_ref − μ_out)/σ_out`, `s_ref` = mean IN-shadow benefit (memorisation) when available, else the main adapter | yes |
+
+LiRA references come from `LIRA_N_SHADOWS` shadow adapters trained on random `LIRA_SHADOW_FRAC` subsets of the target class ([`src/shadow_lora.py`](src/shadow_lora.py)). Because every `U` row is a non-member of the main adapter, a classic observed-vs-OUT LiRA is confounded by adapter strength; the estimators above key membership off the shadows instead.
+
+### Run
+
+Prerequisite: LoRA checkpoints from `run_identification.py` must exist (the scorer reuses them; it does not retrain the main adapter).
+
+```bash
+# Full pipeline, all quadrants, all five estimators incl. leak-free LiRA
+# (trains 8 shadow adapters per quadrant the first time)
+python experiments/run_overlap_scorers.py --with-lira --train-shadows
+
+# Training-free estimators only (PPL ratio, Min-K++, embedding)
+python experiments/run_overlap_scorers.py                       # all quadrants
+python experiments/run_overlap_scorers.py --quadrants q2        # one quadrant
+
+# Reuse already-trained shadows (skip --train-shadows)
+python experiments/run_overlap_scorers.py --with-lira
+```
+
+Offline / air-gapped hosts can skip Hugging Face network stalls with a local snapshot:
+
+```bash
+BASE_MODEL_OVERRIDE=/path/to/hf/hub/models--openai-community--gpt2/snapshots/<hash> \
+HF_HUB_OFFLINE=1 python experiments/run_overlap_scorers.py --with-lira --train-shadows
+```
+
+Shadow adapters land in `checkpoints/shadows/`; delete them to force a clean retrain. Per-quadrant metrics (AUROC, AUPRC, F1, precision, recall, FPR@95TPR, best-F1 threshold) plus the 3-way split sizes are written to `results/{qid}_{name}_overlap_scores.json`.
+
+### Results
+
+Separability on `U` (held-out target vs forget), best-F1 threshold for F1/Prec/Rec:
+
+Separability on `U` (held-out target vs forget), best-F1 threshold for F1/Prec/Rec. Full leak-free sweep (shadows trained only on `lora_train ∪ P`, `U∩shadow-train = 0`):
+
+| Quadrant | Estimator | AUROC | AUPRC | F1 | Prec | Rec | FPR@95 |
+|----------|-----------|:-----:|:-----:|:--:|:----:|:---:|:------:|
+| **Q1 Math** | ppl_ratio | 0.683 | 0.673 | 0.573 | 0.520 | 0.639 | 0.942 |
+| | minkpp | 0.549 | 0.380 | 0.567 | 0.427 | 0.843 | 0.905 |
+| | embedding | 0.610 | 0.557 | 0.566 | 0.399 | 0.976 | 0.876 |
+| | lira_lite | **0.724** | 0.723 | 0.629 | 0.750 | 0.542 | 0.847 |
+| | lira_full _(baseline)_ | 0.227 | 0.256 | 0.548 | 0.377 | 1.000 | 1.000 |
+| **Q2 Code** | ppl_ratio | 0.823 | 0.692 | 0.725 | 0.602 | 0.909 | 0.549 |
+| | minkpp | 0.594 | 0.578 | 0.583 | 0.425 | 0.927 | 0.835 |
+| | **embedding** | **0.852** | **0.798** | 0.748 | 0.769 | 0.727 | 0.626 |
+| | lira_lite | 0.788 | 0.627 | 0.699 | 0.568 | 0.909 | 0.582 |
+| | lira_full _(baseline)_ | 0.818 | 0.669 | 0.758 | 0.649 | 0.909 | 0.637 |
+| **Q3 QA** | ppl_ratio | 0.809 | 0.742 | 0.675 | 0.630 | 0.727 | 0.674 |
+| | **minkpp** | **0.879** | **0.840** | 0.758 | 0.754 | 0.762 | 0.540 |
+| | embedding | 0.832 | 0.721 | 0.708 | 0.610 | 0.843 | 0.560 |
+| | lira_lite | 0.825 | 0.756 | 0.686 | 0.663 | 0.710 | 0.621 |
+| | lira_full _(baseline)_ | 0.396 | 0.319 | 0.545 | 0.375 | 1.000 | 0.970 |
+| **Q4 News** | ppl_ratio | 0.781 | 0.731 | 0.673 | 0.691 | 0.656 | 0.904 |
+| | minkpp | 0.632 | 0.562 | 0.547 | 0.436 | 0.734 | 0.978 |
+| | embedding | 0.578 | 0.452 | 0.547 | 0.377 | 1.000 | 0.937 |
+| | **lira_lite** | **0.787** | **0.740** | 0.687 | 0.694 | 0.680 | 0.889 |
+| | lira_full _(baseline)_ | 0.357 | 0.293 | 0.546 | 0.376 | 1.000 | 0.988 |
+
+No single estimator wins everywhere: embedding leads on code (Q2), Min-K++ dominates QA (Q3), and PPL ratio / `lira_lite` are the most robust across domains. These per-sample scores are the **input representation** for the Active-PU classifier (below), evaluated one estimator at a time.
+
+> **`lira_full` is a baseline, not the main method — its orientation flips across datasets.** Leak-free AUROC is 0.227 (Q1), 0.818 (Q2), 0.396 (Q3), 0.357 (Q4): forget scores *higher* than target in 3 of 4 quadrants. After the leakage fix (shadows restricted to `lora_train ∪ P`, IN branch never fires for `U`), `lira_full` reduces to normalising the weak main-adapter benefit by a per-example OUT-shadow σ that is near-degenerate for forget rows (σ hits its floor, amplifying tiny sign-unstable differences). The Q2 score is also numerically unstable (0.985 → 0.818 on rerun). We therefore keep **`lira_lite`** (ensemble OUT benefit; stable, oriented in all four quadrants) as the LiRA baseline and drop `lira_full` to a reference point. `minkpp` is leak-free by construction (base + LoRA forwards on `U` only).
+>
+> **Earlier leakage (now fixed).** A prior version trained shadows on *all* target rows, so held-out target rows in `U` landed in shadow training sets and `lira_full`'s IN branch read the ground-truth label. The runtime `U ∩ shadow-train = 0` assertion prevents any recurrence.
+
+---
+
+## Active nnPU & full method comparison
+
+The **main method** ([`src/active_pu.py`](src/active_pu.py), driver [`experiments/run_active_pu.py`](experiments/run_active_pu.py)) frames target–forget separation as Positive-Unlabeled learning and improves it with active labeling and negative mining — directly aligned with estimating target–forget *overlap*. The same driver runs it against a full ladder of baselines so every claim is measured against a control.
+
+### Method roster
+
+| Method | Type | Classifier | Acquisition | Labels used |
+|--------|------|------------|-------------|-------------|
+| `raw_*` (one per estimator) | detector | none | none | 0 |
+| `naive_pn` | PU | logistic (U treated as negative) | none | `P` only |
+| `pu_static_linear` | PU | nnPU, linear head | none | `P` only |
+| `pu_static_mlp` | PU | nnPU, 1-hidden MLP | none | `P` only |
+| `active_random` | active | nnPU, linear | random (passive baseline) | `P` + budget |
+| `active_uncertainty` | active | nnPU, linear | margin `1−\|2p−1\|` | `P` + budget |
+| `active_diversity` | active | nnPU, linear | k-center / coreset (cosine) | `P` + budget |
+| `active_badge` | active | nnPU, linear | gradient-embedding k-means++ | `P` + budget |
+| `active_committee` | active | nnPU, linear | QBC estimator disagreement | `P` + budget |
+| `active_uxd` | active | nnPU, linear | Uncertainty × Diversity | `P` + budget |
+| `supervised_skyline` | ceiling | logistic on the **fully-labeled** U-pool | — | `P` + all U-pool |
+
+### Pipeline (proposal Stages 3–7)
+
+1. **nnPU (Stage 3).** Non-negative PU risk (Kiryo et al., 2017) with the sigmoid surrogate, trained on positives `P` and unlabeled `U_pool` with a re-estimated prior π each round. `PUNet` is linear (`PU_HIDDEN=0`, default) or a 1-hidden-layer MLP. **Retrained from scratch every round** (`init_seed = seed + round`).
+2. **Active acquisition (Stage 4).** Queried rows are **removed** from `U_pool` and added to the labeled set (positives or confirmed negatives). Uncertainty uses **sigmoid probabilities** (`1−|2p−1|`), not raw logits.
+3. **Reliable negatives (Stage 5).** The lowest-probability tail of the remaining pool becomes soft negatives for the final head.
+4. **Hard negatives (Stage 6).** Acquired forget rows that scored highly sit on the overlap boundary.
+5. **Final classifier (Stage 7).** Calibrated logistic + isotonic on labeled + reliable negatives. **Reported metric for active methods.** Static PU (`pu_static_*`) reports **round-0 nnPU** on `U_test` instead — Stage 7's reliable-negative bootstrap *hurts* when no negatives have been acquired (0.925 → 0.650 on Q3).
+
+### Active-PU loop audit (all checks pass)
+
+Run `python experiments/run_active_pu.py --audit --quadrants q2` to verify:
+
+| Check | Status |
+|-------|--------|
+| Queried samples removed from `U_pool` | ✓ `unlabeled.discard(j)` each round |
+| Labeled set grows and is used in retraining | ✓ `n_labeled` increases; `p_ids`/`n_ids` fed to `train_nnpu` |
+| Model retrained from scratch each round | ✓ new `PUNet` + `init_seed=seed+round` |
+| Uncertainty from probabilities (margin / entropy) | ✓ `pu_proba` → `1−\|2p−1\|` |
+| Prior updated each round | ✓ `_estimate_prior()` from remaining hidden positives in pool |
+| Features z-scored on train rows only (never `U_test`) | ✓ `_standardize_train(P∪labeled∪remaining pool)` per round |
+
+### Evaluation protocol & leakage discipline
+
+The unlabeled pool `U` is split once (stratified, `SPLIT_SEED`, shared by every method and seed) into:
+
+| Slice | Role |
+|-------|------|
+| `U_pool` (50%) | acquirable pool — nnPU unlabeled inputs, acquisition, reliable-negative mining |
+| `U_test` (50%) | **held out** — never trained on, never unlabeled input, never acquired |
+
+**Every metric is computed on `U_test` only.** Upstream: LoRA trains only on `lora_train`; `emb_cos` centroid from `P` only; `lira_lite` asserts `U∩shadow-train=0`; PPL/Min-K++ are forward-only on unscored rows.
+
+### Classifier features — overlap scores, not the raw embedding
+
+The classifier input is `[ppl_ratio, minkpp, emb_cos, lira_lite]` (`PU_SCORE_COLS`). The 768-d LoRA embedding is used **only** for diversity/coreset acquisition. Cached to `results/{qid}_{name}_pu_features.npz`.
+
+### Run / reproduce
+
+```bash
+# 0) prerequisites (once)
+python experiments/run_identification.py
+python experiments/run_overlap_scorers.py --with-lira --train-shadows
+
+# 1) audit the active loop (optional)
+python experiments/run_active_pu.py --audit --quadrants q2
+
+# 2) full comparison — all quadrants, 13 methods, 5 seeds
+python experiments/run_active_pu.py
+
+# variants
+python experiments/run_active_pu.py --quadrants q2 --seeds 10
+python experiments/run_active_pu.py --no-lira
+python experiments/run_active_pu.py --rebuild-cache   # force feature re-extraction
+```
+
+Offline: `BASE_MODEL_OVERRIDE=/path/to/gpt2/snapshot HF_HUB_OFFLINE=1 python experiments/run_active_pu.py`
+
+**Outputs:** `results/{qid}_{name}_comparison.json`, `results/comparison_summary.{json,md}`, and plots under `plots/comparison/`:
+
+| Plot | What it shows |
+|------|---------------|
+| `{qid}_label_efficiency.png` | Per-round nnPU (solid), fixed-init (dashed), warm-start (dotted), Stage-7 ★ |
+| `{qid}_init_mode_comparison.png` | 6-panel: init-mode curves per acquisition strategy |
+| `{qid}_active_dual_metrics.png` | Grouped bars: last nnPU vs Stage-7 final |
+| `{qid}_method_ranking.png` | All methods ranked by AUROC |
+| `comparison_auroc_heatmap.png` | Methods × quadrants heatmap |
+| `comparison_active_head_to_head.png` | Active strategies: last nnPU vs Stage-7 |
+| `comparison_best_per_quadrant.png` | Best-of-family bars per quadrant |
+
+Active methods report **two** AUROC scores in JSON/console: `last_nnpu` (end-of-loop nnPU) and `stage7_final` (calibrated logistic). The master table uses Stage-7; see the dual table in `comparison_summary.md`.
+
+### Results — held-out `U_test`, mean ± std over 5 seeds
+
+Full tables for AUROC / AUPRC / F1 / Prec / Rec / FPR@95: [`results/comparison_summary.md`](results/comparison_summary.md).
+
+**AUROC master table:**
+
+| Method | Type | Q1 Math | Q2 Code | Q3 QA | Q4 News |
+|--------|------|:-------:|:-------:|:-----:|:-------:|
+| raw ppl_ratio | detector | 0.735 | 0.845 | 0.822 | 0.790 |
+| raw minkpp | detector | 0.562 | 0.563 | **0.884** | 0.643 |
+| raw emb_cos | detector | 0.583 | **0.898** | 0.836 | 0.578 |
+| raw lira_lite | detector | 0.767 | 0.812 | 0.837 | **0.800** |
+| naive_pn | PU | 0.806 | 0.858 | 0.916 | 0.777 |
+| pu_static_linear | PU | 0.720 | 0.851 | **0.925** | 0.791 |
+| pu_static_mlp | PU | **0.811** | 0.852 | 0.915 | 0.773 |
+| active_random | active | 0.787 | 0.863 | 0.921 | 0.781 |
+| **active_uncertainty** | active | 0.811 | **0.923** | 0.881 | 0.707 |
+| active_diversity | active | 0.804 | 0.836 | 0.913 | **0.785** |
+| active_badge | active | 0.805 | 0.898 | 0.912 | 0.767 |
+| active_committee | active | 0.792 | 0.907 | 0.915 | **0.785** |
+| active_uxd | active | 0.807 | 0.878 | 0.896 | 0.709 |
+| supervised_skyline | ceiling | **0.844** | 0.885 | **0.930** | 0.784 |
+
+**Condensed best-of-family (AUROC):**
+
+| Quadrant | Best raw | naive PN | Static nnPU | **Active PU (best)** | Skyline |
+|----------|:--------:|:--------:|:-----------:|:--------------------:|:-------:|
+| Q1 Math | 0.767 | 0.806 | 0.811 (mlp) | 0.811 | **0.844** |
+| Q2 Code | 0.898 | 0.858 | 0.851 | **0.923** | 0.885 |
+| Q3 QA | 0.884 | 0.916 | **0.925** | 0.921 | **0.930** |
+| Q4 News | 0.800 | 0.777 | 0.791 | 0.785 | 0.784 |
+
+**Q3 QA — full metrics** (`P=156, U_pool=622, U_test=622, budget=12`; best active in bold)
+
+| Method | AUROC | AUPRC | F1 | Prec | Rec | FPR@95 |
+|--------|:-----:|:-----:|:--:|:----:|:---:|:------:|
+| raw minkpp | 0.884 | 0.845 | 0.771 | 0.777 | 0.764 | 0.527 |
+| naive_pn | 0.916 | 0.870 | 0.815 | 0.815 | 0.815 | 0.409 |
+| **pu_static_linear** | **0.925** | 0.878 | 0.815 | 0.782 | 0.852 | 0.346 |
+| pu_static_mlp | 0.915 | 0.868 | 0.804 | 0.774 | 0.837 | 0.391 |
+| active_random | 0.921 | 0.844 | 0.808 | 0.782 | 0.842 | 0.502 |
+| active_committee | 0.915 | 0.817 | 0.815 | 0.826 | 0.805 | 0.466 |
+| active_diversity | 0.913 | 0.811 | 0.810 | 0.789 | 0.835 | 0.351 |
+| active_uncertainty | 0.881 | 0.774 | 0.741 | 0.709 | 0.835 | 0.482 |
+| supervised_skyline | 0.930 | 0.891 | 0.828 | 0.831 | 0.824 | 0.344 |
+
+### What the comparison shows
+
+- **Static nnPU works** when reported as round-0 scores (Q3 **0.925**, Q2 **0.851**). The earlier "collapse" was a Stage-7 reporting artifact, not broken nnPU optimization.
+- **Skyline is a genuine ceiling** — active PU never exceeds it (Q3: 0.921 vs 0.930; Q2: 0.923 vs 0.885 within noise on 73-row test).
+- **Active labeling helps via acquired negatives + calibrated final head**, especially when static nnPU alone is insufficient (Q1: static 0.72 → active 0.81; Q4: uncertainty-only hurts at 0.71).
+- **`naive_pn` remains a strong control** (Q3 0.916) but treats the entire pool as negative; active methods match it with far fewer true labels.
+- **Uncertainty-only is unstable** on Q4 (AUROC 0.71, FPR@95 0.97) — over-sampling the ambiguous overlap region injects label noise.
+
+### Label efficiency & dual metrics
+
+Per-round curves now show three init modes plus the Stage-7 endpoint (★):
+
+- **Solid** — fresh random init each round (default; can dip mid-run from init noise)
+- **Dashed** — fixed `init_seed` across rounds (smoother, monotonic-ish)
+- **Dotted** — warm-start from previous round's weights
+- **★** — Stage-7 calibrated final at max label budget
+
+Q4 (shows Stage-7 hurting uncertainty on overlap-heavy news):
+
+![Q4 label efficiency](plots/comparison/q4_label_efficiency.png)
+
+Init-mode panels (Q4):
+
+![Q4 init modes](plots/comparison/q4_init_mode_comparison.png)
+
+Active dual metrics — last nnPU vs Stage-7 (Q4):
+
+![Q4 dual metrics](plots/comparison/q4_active_dual_metrics.png)
+
+Cross-quadrant heatmap:
+
+![AUROC heatmap](plots/comparison/comparison_auroc_heatmap.png)
 
 ---
 
@@ -280,6 +545,18 @@ Q2 and Q3 show the strongest combined AUROC. Q1 has the largest eval among the m
 | `SPLIT_SEED` | `42` | K-means + selection reproducibility |
 | `PROBE_BATCH` | `16` | Hidden-state batch size |
 | `PROBE_POOL` | `"mean"` | Token pooling (`mean` or `last`) |
+| `P_RATIO` | `0.2` | Target fraction reserved as PU positives / reference (`make_pu_split`) |
+| `MINK_FRAC` | `0.2` | Min-K++ fraction of most-surprising tokens averaged |
+| `LIRA_N_SHADOWS` | `8` | Shadow LoRA adapters for LiRA |
+| `LIRA_SHADOW_FRAC` | `0.5` | Target fraction each shadow trains on |
+| `PU_SCORE_COLS` | `[ppl_ratio, minkpp, emb_cos, lira_lite]` | Overlap-score columns used as classifier features |
+| `PU_HIDDEN` | `0` | nnPU head width (0 ⇒ linear; >0 ⇒ MLP) |
+| `PU_MLP_HIDDEN` | `32` | Width of the `pu_static_mlp` baseline head |
+| `PU_ROUNDS` / `PU_BUDGET` | `8` / `12` | Active rounds and oracle labels per round |
+| `PU_EPOCHS` / `PU_LR` | `200` / `1e-2` | nnPU refit schedule |
+| `PU_PRIOR` | `known` | Positive prior π in U (`known` from split, or a float) |
+| `PU_SEEDS` | `5` | Repeats for mean ± std in the comparison |
+| `BASE_MODEL_OVERRIDE` (env) | — | Point `BASE_MODEL` at a local HF snapshot for offline runs |
 
 Edit [`config.py`](config.py) for model and split settings. **Eval size** is set in [`download.py`](download.py):
 
@@ -302,13 +579,18 @@ modelunlearning/
 ├── download.py
 ├── requirements.txt
 ├── experiments/
-│   └── run_identification.py      # main entry point
+│   ├── run_identification.py      # identification benchmark
+│   ├── run_overlap_scorers.py     # Active-PU Stage 2/8: overlap estimators + metrics
+│   └── run_active_pu.py           # Active-PU Stage 3–8: nnPU + baselines, full comparison
 ├── src/
-│   ├── data_loader.py             # load, split, audit
+│   ├── data_loader.py             # load, split (incl. make_pu_split), audit
 │   ├── sample_select.py           # active-learning selection
 │   ├── hidden_states.py           # pooled hidden-state extraction
 │   ├── lora_trainer.py
 │   ├── scorer.py
+│   ├── overlap_scorers.py         # PPL ratio, Min-K++, embedding, LiRA-lite/full
+│   ├── shadow_lora.py             # shadow adapters for LiRA references
+│   ├── active_pu.py               # nnPU + 6 acquisition strategies + PN/static/skyline baselines
 │   ├── metrics.py
 │   ├── probe.py                   # layerwise drift
 │   └── plotting.py
@@ -327,6 +609,10 @@ modelunlearning/
 | `results/{qid}_{name}_metrics.json` | Full metric dict per method |
 | `results/{qid}_{name}_audit.json` | Leakage audit receipts + sample IDs |
 | `results/{qid}_{name}_drift.json` | Per-layer drift means, Δ, L2 backup |
+| `results/{qid}_{name}_overlap_scores.json` | Overlap-estimator metrics + 3-way split sizes |
+| `results/{qid}_{name}_pu_features.npz` | Cached score columns + LoRA embedding for the P∪U pool |
+| `results/{qid}_{name}_comparison.json` | All methods: per-metric mean ± std + label-efficiency curves |
+| `results/comparison_summary.{json,md}` | Cross-quadrant AUROC master table |
 
 ---
 
@@ -369,4 +655,3 @@ Typical **length-only AUROC** after matching: ≈ 0.50 ± 0.02 (Q3/Q4); Q1/Q2 ma
 ## Dependencies
 
 See [`requirements.txt`](requirements.txt): `torch`, `transformers`, `peft`, `scikit-learn`, `scipy`, `matplotlib`, `seaborn`, `umap-learn`, `pandas`, `numpy`, `tqdm`. Dataset download additionally uses `datasets` (installed when running `download.py`).
-# Unlearning

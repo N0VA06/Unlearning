@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import DATA_QUAD, QUADRANTS, SPLIT_SEED, SPLIT_RATIO
+from config import DATA_QUAD, QUADRANTS, SPLIT_SEED, SPLIT_RATIO, LORA_RATIO, P_RATIO
 
 
 REQUIRED_COLS = ["id", "source", "text", "quadrant_label", "role"]
@@ -223,6 +223,113 @@ def audit_split(df: pd.DataFrame, train_target_idx: np.ndarray, eval_idx: np.nda
         "sample_train":           [list(t) for t in sample_train],
         "sample_eval_heldout":    [list(t) for t in sample_eval_heldout],
         "sample_eval_forget":     [list(t) for t in sample_eval_forget],
+    }
+
+
+def load_train_keys(checkpoint_dir: Path) -> set:
+    """Read the exact (source, id) keys a LoRA adapter was trained on from its
+    split_info.json. Lets a downstream split stay consistent with an already
+    trained adapter (no retrain)."""
+    info_path = Path(checkpoint_dir) / "split_info.json"
+    if not info_path.exists():
+        raise FileNotFoundError(f"No split_info.json in {checkpoint_dir}")
+    with info_path.open("r") as f:
+        info = json.load(f)
+    return set(tuple(k) for k in info["train_keys"])
+
+
+def make_pu_split(
+    df: pd.DataFrame,
+    target_signals: dict = None,
+    lora_ratio: float = LORA_RATIO,
+    p_ratio: float = P_RATIO,
+    seed: int = SPLIT_SEED,
+    lora_train_keys: set = None,
+):
+    """Three-way target split for leakage-free Positive-Unlabeled learning.
+
+    The target class (label==1) is partitioned into:
+      * ``lora_train`` — rows used ONLY to fit the LoRA adapter (adaptation).
+      * ``P``          — labeled positives / reference target, **disjoint** from
+                         lora_train, so overlap scores on P are not inflated by
+                         the adapter having memorised them.
+      * ``heldout``    — the remaining target rows (hidden positives in U).
+    All forget rows (label==0) go into the unlabeled pool U alongside heldout.
+
+    Parameters
+    ----------
+    lora_train_keys : set of (source, id), optional
+        If given (e.g. from an existing checkpoint's ``split_info.json`` via
+        :func:`load_train_keys`), exactly those rows become ``lora_train`` so the
+        split matches an already-trained adapter — no retraining required.
+        Otherwise ``lora_train`` is chosen by the same uncertain+diverse active
+        selection as :func:`make_informative_split` (needs ``target_signals``).
+
+    Returns
+    -------
+    dict with df-positional index arrays: ``lora_train_idx``, ``p_idx``,
+    ``heldout_target_idx``, ``forget_idx``, ``u_idx``.
+    """
+    labels = df["quadrant_label"].values.astype(int)
+    target_pos = np.where(labels == 1)[0]
+    forget_pos = np.where(labels == 0)[0]
+    if len(target_pos) == 0 or len(forget_pos) == 0:
+        raise ValueError("Both target (label=1) and forget (label=0) records are required.")
+
+    n_target = len(target_pos)
+
+    # 1) LoRA-train subset
+    if lora_train_keys is not None:
+        keys = list(zip(df["source"].tolist(), df["id"].tolist()))
+        lora_train_idx = np.array(
+            [i for i in target_pos if keys[i] in lora_train_keys], dtype=np.int64
+        )
+        if len(lora_train_idx) == 0:
+            raise ValueError("None of lora_train_keys matched target rows in df.")
+    else:
+        if target_signals is None or "embeddings" not in target_signals:
+            raise ValueError("target_signals with 'embeddings' required when "
+                             "lora_train_keys is not provided.")
+        from src.sample_select import compose_uncertainty, select_uncertain_diverse
+        n_lora = max(1, int(round(n_target * lora_ratio)))
+        uncertainty = compose_uncertainty(target_signals)
+        in_target = select_uncertain_diverse(
+            target_signals["embeddings"], uncertainty, n_lora, seed=seed
+        )
+        lora_train_idx = np.sort(target_pos[in_target])
+
+    # 2) P (labeled positives / reference) — random, representative, disjoint
+    remaining = np.array(sorted(set(target_pos.tolist()) - set(lora_train_idx.tolist())),
+                         dtype=np.int64)
+    n_p = max(1, int(round(n_target * p_ratio)))
+    n_p = min(n_p, max(1, len(remaining) - 1))  # keep at least one held-out positive
+    rng = np.random.default_rng(seed)
+    p_idx = np.sort(rng.choice(remaining, size=n_p, replace=False))
+
+    # 3) held-out target (hidden positives in U)
+    heldout_target_idx = np.array(
+        sorted(set(remaining.tolist()) - set(p_idx.tolist())), dtype=np.int64
+    )
+    forget_idx = np.sort(forget_pos)
+    u_idx = np.sort(np.concatenate([heldout_target_idx, forget_idx]))
+
+    # Disjointness guarantees
+    assert len(np.intersect1d(lora_train_idx, p_idx)) == 0, "P leaks into lora_train"
+    assert len(np.intersect1d(lora_train_idx, u_idx)) == 0, "lora_train leaks into U"
+    assert len(np.intersect1d(p_idx, u_idx)) == 0, "P leaks into U"
+    assert set(df.iloc[lora_train_idx]["quadrant_label"].unique().tolist()) == {1}
+    assert set(df.iloc[p_idx]["quadrant_label"].unique().tolist()) == {1}
+
+    print(f"[pu_split] lora_train={len(lora_train_idx)}  P(pos)={len(p_idx)}  "
+          f"heldout_target={len(heldout_target_idx)}  forget={len(forget_idx)}  "
+          f"U={len(u_idx)}")
+
+    return {
+        "lora_train_idx":     lora_train_idx,
+        "p_idx":              p_idx,
+        "heldout_target_idx": heldout_target_idx,
+        "forget_idx":         forget_idx,
+        "u_idx":              u_idx,
     }
 
 
