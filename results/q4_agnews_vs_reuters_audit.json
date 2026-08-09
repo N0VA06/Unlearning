@@ -1,0 +1,59 @@
+{
+  "row_overlap": 0,
+  "source_id_overlap": 0,
+  "exact_text_overlap": 0,
+  "normalized_text_overlap": 0,
+  "train_label_set": [
+    1
+  ],
+  "eval_label_set": [
+    0,
+    1
+  ],
+  "forget_in_train": 0,
+  "n_train_target": 600,
+  "n_heldout_target": 2400,
+  "n_forget": 3000,
+  "sample_train": [
+    [
+      "ag_news",
+      9978
+    ],
+    [
+      "ag_news",
+      5598
+    ],
+    [
+      "ag_news",
+      28801
+    ]
+  ],
+  "sample_eval_heldout": [
+    [
+      "ag_news",
+      4710
+    ],
+    [
+      "ag_news",
+      23626
+    ],
+    [
+      "ag_news",
+      16808
+    ]
+  ],
+  "sample_eval_forget": [
+    [
+      "xsum_summary",
+      8865
+    ],
+    [
+      "xsum_summary",
+      2730
+    ],
+    [
+      "xsum_summary",
+      6323
+    ]
+  ]
+}

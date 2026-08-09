@@ -1,0 +1,59 @@
+{
+  "row_overlap": 0,
+  "source_id_overlap": 0,
+  "exact_text_overlap": 0,
+  "normalized_text_overlap": 0,
+  "train_label_set": [
+    1
+  ],
+  "eval_label_set": [
+    0,
+    1
+  ],
+  "forget_in_train": 0,
+  "n_train_target": 600,
+  "n_heldout_target": 2400,
+  "n_forget": 3000,
+  "sample_train": [
+    [
+      "squad",
+      16400
+    ],
+    [
+      "squad",
+      3908
+    ],
+    [
+      "squad",
+      24117
+    ]
+  ],
+  "sample_eval_heldout": [
+    [
+      "squad",
+      4149
+    ],
+    [
+      "squad",
+      22173
+    ],
+    [
+      "squad",
+      9097
+    ]
+  ],
+  "sample_eval_forget": [
+    [
+      "nq_open",
+      27872
+    ],
+    [
+      "nq_open",
+      8443
+    ],
+    [
+      "nq_open",
+      25195
+    ]
+  ]
+}

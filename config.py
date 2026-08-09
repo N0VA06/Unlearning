@@ -8,12 +8,13 @@ RESULTS     = ROOT / "results"
 PLOTS       = ROOT / "plots"
 
 # Allow pointing to a local snapshot dir (useful for offline / air-gapped runs).
-BASE_MODEL   = os.environ.get("BASE_MODEL_OVERRIDE", "openai-community/gpt2")
-MAX_SEQ_LEN  = 128
-LORA_R       = 8
-LORA_ALPHA   = 16
+# Default backbone is GPT-2 Medium (stronger membership signal than gpt2-small).
+BASE_MODEL   = os.environ.get("BASE_MODEL_OVERRIDE", "openai-community/gpt2-medium")
+MAX_SEQ_LEN  = 256          # longer context for math/code (was 128)
+LORA_R       = 16           # stronger adapter (was 8)
+LORA_ALPHA   = 32           # keep α = 2·r
 LORA_DROPOUT = 0.05
-TRAIN_EPOCHS = 1
+TRAIN_EPOCHS = 3            # more adaptation passes (was 1)
 LR           = 2e-4
 BATCH_SIZE   = 1
 UMAP_SEED    = 42
@@ -42,8 +43,10 @@ LIRA_SEED        = 42
 # 768-d LoRA embedding trivialises the task via dataset-identity, see README).
 PU_SCORE_COLS    = ["ppl_ratio", "minkpp", "emb_cos", "lira_lite"]
 PU_PRIOR         = "known"      # positive class prior in U: 'known' (from split) or a float
-PU_ROUNDS        = 8            # active-learning acquisition rounds
-PU_BUDGET        = 12           # oracle labels acquired per round
+# Budgets scale with U_pool in run_active_pu (≈6% of pool, capped by PU_BUDGET).
+# Raised for DATA_SCALE=large quadrants so label-efficiency curves have room to move.
+PU_ROUNDS        = 10           # active-learning acquisition rounds
+PU_BUDGET        = 40           # oracle labels acquired per round (cap; actual ≈0.06·|U_pool|)
 PU_EPOCHS        = 200          # nnPU training epochs per refit
 PU_LR            = 1e-2         # AdamW learning rate for the nnPU head
 PU_HIDDEN        = 0            # nnPU head width (0 ⇒ linear; >0 ⇒ 1-hidden MLP)

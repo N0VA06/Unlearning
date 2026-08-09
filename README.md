@@ -4,6 +4,11 @@ Can we tell **target** records from **forget** records after training a small Lo
 
 This repo implements a diagnostic pipeline that tests two scoring signals — a **perplexity ratio** (base GPT-2 vs LoRA-adapted GPT-2) and an **embedding similarity** score (LoRA hidden states) — across four **same-domain** dataset pairs. LoRA is trained on an actively selected 20% of target rows; all metrics are computed on a held-out eval set (remaining target + all forget). Strict leakage audits run before every training step.
 
+> 📘 **New to the concepts, or deciding what to run next?** See [`explanation.md`](explanation.md)
+> — plain-language explanations of PU learning, nnPU, BADGE, diversity/coreset,
+> QBC and the baselines, plus an honest read of the current results and two
+> concrete plans for the next experiment.
+
 ---
 
 ## Table of contents
@@ -35,12 +40,14 @@ Each quadrant pairs two datasets from the **same broad domain** so that text len
 
 `quadrant_label = 1` → target (LoRA training source), `0` → forget (never trained on).
 
-| Q | Domain | Target (`label=1`) | Forget (`label=0`) |
-|---|--------|--------------------|--------------------|
-| Q1 | Math word problems | GSM8K | SVAMP |
-| Q2 | Python code | HumanEval | MBPP |
-| Q3 | Extractive QA | SQuAD | NQ-open |
-| Q4 | Short news | AG News | XSum summaries |
+| Q | Domain | Target (`label=1`) | Forget (`label=0`) | Large scale (≈) |
+|---|--------|--------------------|--------------------|-----------------|
+| Q1 | Math word problems | GSM8K (train+test) | SVAMP + ASDiv + hendrycks_math | **~4k** |
+| Q2 | Python code | HumanEval + CodeSearchNet (doc+code) | MBPP + CSN code-only (disjoint) | **~4k** |
+| Q3 | Extractive QA | SQuAD | NQ-open | ~6k |
+| Q4 | Short news | AG News | XSum summaries | ~6k |
+
+Q1/Q2 are sized ≥3000 combined so Active-PU has real `U_pool`s (~1600). Forget pads are chosen to keep **length-AUROC ≈ 0.50** (Q2 forget uses code-only CSN so it is not a clone of the target docstring+code pad). Backbone: **GPT-2 Medium**, LoRA `r=16`, `TRAIN_EPOCHS=3`, `MAX_SEQ_LEN=256`.
 
 **Train / eval split**
 
@@ -54,13 +61,28 @@ Each quadrant pairs two datasets from the **same broad domain** so that text len
 
 ```bash
 pip install -r requirements.txt
-python download.py                       # one-time: build data/raw/ and data/quadrants/
-python experiments/run_identification.py # train LoRA, score, metrics, plots (per quadrant)
+
+# Build length-matched quadrants (default = large Active-PU scale)
+DATA_SCALE=large python download.py          # ~0.7k–5k rows / quadrant
+# DATA_SCALE=small python download.py        # legacy compact sizes
+
+# Full pipeline after a data rebuild (old checkpoints are invalid)
+rm -rf checkpoints/q*_  checkpoints/shadows results/*_pu_features.npz results/*_comparison.json
+python experiments/run_identification.py                              # train LoRAs
+python experiments/run_overlap_scorers.py --with-lira --train-shadows  # shadows + scores
+python experiments/run_active_pu.py --rebuild-cache                    # Active-PU comparison
 ```
 
-Requires Python 3.10+, PyTorch, and optionally CUDA. Checkpoints skip re-training if `checkpoints/q{n}_*_r20_s42_e1/` already exists.
+Requires Python 3.10+, PyTorch, and optionally CUDA. Checkpoints skip re-training if `checkpoints/q{n}_*_r20_s42_e1/` already exists — **delete them after changing `DATA_SCALE` or `download.py` knobs**.
 
-To change eval size for Q1/Q2, edit `download.py` → `python download.py` → remove affected `checkpoints/q{n}_*` → `python experiments/run_identification.py`.
+Expected Active-PU split sizes under `DATA_SCALE=large` (≈):
+
+| Quadrant | Combined | ≈P | ≈U_pool | ≈U_test |
+|----------|---------:|---:|--------:|--------:|
+| Q1 Math | 710 | 71 | 284 | 284 |
+| Q2 Code | 1632 | 163 | 653 | 653 |
+| Q3 QA | 4714 | 471 | 1886 | 1886 |
+| Q4 News | 5326 | 533 | 2130 | 2130 |
 
 ---
 
@@ -385,7 +407,7 @@ Cross-quadrant heatmap:
 
 ### `config.py`
 
-Central paths (`DATA_QUAD`, `CHECKPOINTS`, `RESULTS`, `PLOTS`) and hyperparameters: `BASE_MODEL = openai-community/gpt2`, `MAX_SEQ_LEN = 128`, LoRA `r=8, α=16`, `SPLIT_RATIO = 0.2`, `SPLIT_SEED = 42`, `TRAIN_EPOCHS = 1`. The `QUADRANTS` dict maps each `qid` to its directory name and display label.
+Central paths (`DATA_QUAD`, `CHECKPOINTS`, `RESULTS`, `PLOTS`) and hyperparameters: `BASE_MODEL = openai-community/gpt2-medium`, `MAX_SEQ_LEN = 256`, LoRA `r=16, α=32`, `SPLIT_RATIO = 0.2`, `SPLIT_SEED = 42`, `TRAIN_EPOCHS = 3`. The `QUADRANTS` dict maps each `qid` to its directory name and display label.
 
 ### `download.py`
 
@@ -536,10 +558,10 @@ Q2 and Q3 show the strongest combined AUROC. Q1 has the largest eval among the m
 
 | Knob | Default | Role |
 |------|---------|------|
-| `BASE_MODEL` | `openai-community/gpt2` | Backbone + LoRA host |
-| `MAX_SEQ_LEN` | `128` | Token truncation |
-| `LORA_R` / `LORA_ALPHA` | `8` / `16` | Adapter capacity |
-| `TRAIN_EPOCHS` | `1` | Training passes over train subset |
+| `BASE_MODEL` | `openai-community/gpt2-medium` | Backbone + LoRA host |
+| `MAX_SEQ_LEN` | `256` | Token truncation |
+| `LORA_R` / `LORA_ALPHA` | `16` / `32` | Adapter capacity |
+| `TRAIN_EPOCHS` | `3` | Training passes over train subset |
 | `LR` | `2e-4` | AdamW |
 | `SPLIT_RATIO` | `0.2` | Fraction of target used for LoRA |
 | `SPLIT_SEED` | `42` | K-means + selection reproducibility |
@@ -552,22 +574,26 @@ Q2 and Q3 show the strongest combined AUROC. Q1 has the largest eval among the m
 | `PU_SCORE_COLS` | `[ppl_ratio, minkpp, emb_cos, lira_lite]` | Overlap-score columns used as classifier features |
 | `PU_HIDDEN` | `0` | nnPU head width (0 ⇒ linear; >0 ⇒ MLP) |
 | `PU_MLP_HIDDEN` | `32` | Width of the `pu_static_mlp` baseline head |
-| `PU_ROUNDS` / `PU_BUDGET` | `8` / `12` | Active rounds and oracle labels per round |
+| `PU_ROUNDS` / `PU_BUDGET` | `10` / `40` | Active rounds and per-round oracle-label cap (actual ≈ `0.06·|U_pool|`) |
 | `PU_EPOCHS` / `PU_LR` | `200` / `1e-2` | nnPU refit schedule |
 | `PU_PRIOR` | `known` | Positive prior π in U (`known` from split, or a float) |
 | `PU_SEEDS` | `5` | Repeats for mean ± std in the comparison |
 | `BASE_MODEL_OVERRIDE` (env) | — | Point `BASE_MODEL` at a local HF snapshot for offline runs |
 
-Edit [`config.py`](config.py) for model and split settings. **Eval size** is set in [`download.py`](download.py):
+Edit [`config.py`](config.py) for model and split settings. **Eval / Active-PU size** is controlled by `DATA_SCALE` and knobs in [`download.py`](download.py):
 
-| Knob | Q1 (current) | Q2 (current) | Effect |
-|------|--------------|--------------|--------|
-| `N_BINS_PER` | 10 | 8 | Fewer bins → more rows per class (watch length-AUROC) |
-| `LOWER` | 60 | 80 | Lower → keep shorter texts |
-| `TRUNC` | 200 | 400 | Upper cap on characters |
-| `TARGET_N` | 1000 | 500 | Max rows per class after matching |
+| Knob | `large` (default) | `small` | Effect |
+|------|-------------------|---------|--------|
+| `DATA_SCALE` | `large` | `small` | Env var selecting the profile |
+| `TARGET_N` | 2500 / 2000 / 3000 / 3000 | 1000 / 500 / 1000 / 1000 | Max rows per class after matching |
+| `N_BINS_PER` | 8 / 8 / 20 / 20 | 10 / 8 / 30 / 30 | More bins → lower length-AUROC, fewer rows |
+| `RAW_CAP` (Q3/Q4) | 30 000 | 8 000 | Upstream rows before matching |
+| Q1 forget pad | SVAMP + soft ASDiv (≤300) | SVAMP only | Soft mix; full ASDiv hurt the skyline |
+| Q2 pads | HumanEval+CSN vs **MBPP only** | HumanEval vs MBPP | CSN on forget collapsed Q2 signal |
 
-Eval size ≈ `0.8 × n_target + n_forget` with matched `n_target ≈ n_forget`. Q2 is capped by HumanEval (164 problems) and overlap with MBPP.
+Active-PU budgets in `config.py`: `PU_ROUNDS=10`, `PU_BUDGET=40` (actual per-round budget = `min(PU_BUDGET, 0.06·|U_pool|)`).
+
+Eval size ≈ `n_target + n_forget` with matched `n_target ≈ n_forget`. Length-only AUROC after matching should stay near 0.5 (Q3/Q4 ≈ 0.50; Q1/Q2 ≈ 0.50–0.56).
 
 ---
 
@@ -644,11 +670,13 @@ Typical **length-only AUROC** after matching: ≈ 0.50 ± 0.02 (Q3/Q4); Q1/Q2 ma
 
 ## Caveats
 
-- **Q2 sample size** — HumanEval has only 164 problems; relaxed matching yields ~91 rows per class (~164 eval). Further gains need looser bins or a larger target corpus, not just `TARGET_N`.
-- **Q1 trade-off** — Looser length matching increases eval size (e.g. 149 → 247) but can weaken AUROC and push embedding toward random.
+- **Retrain after scaling** — changing `DATA_SCALE` or `download.py` invalidates LoRA checkpoints, shadows, and `*_pu_features.npz`. Delete them before re-running the pipeline.
+- **Q1 length trade-off** — GSM8K answers are often near the 200-char cap while SVAMP/ASDiv are shorter; tighter bins cut size, looser bins raise length-AUROC (~0.55). Prefer size with a printed length-AUROC check over forcing TARGET_N.
+- **Q2 source pads** — under `large`, HumanEval is padded with CodeSearchNet Python (target) and MBPP with a *disjoint* CSN slice (forget). Canonical pair name stays `humaneval_vs_mbpp`; inspect `source` fields in the JSON if you need per-source breakdowns.
 - **Template residue** — Length is matched; dataset-specific formatting (answer markers, code style, QA spans) may still differ. Inspect `*_audit.json` sample rows if AUROC looks unexpected.
 - **Membership framing** — LoRA is optimized for the target distribution. The 80/20 split tests generalization beyond the train subset, not cold membership on an unrelated domain.
 - **Q4 forget style** — XSum summaries vs AG News snippets; length is controlled but forget text is abstractive summary prose.
+- **Runtime** — `DATA_SCALE=large` makes identification, LiRA shadows, and feature extraction substantially slower (especially Q3/Q4). Plan for multi-hour CPU runs or use CUDA.
 
 ---
 
