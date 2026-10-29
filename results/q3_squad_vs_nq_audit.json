@@ -11,49 +11,49 @@
     1
   ],
   "forget_in_train": 0,
-  "n_train_target": 156,
-  "n_heldout_target": 622,
-  "n_forget": 778,
+  "n_train_target": 600,
+  "n_heldout_target": 2400,
+  "n_forget": 3000,
   "sample_train": [
     [
       "squad",
-      5243
+      16400
     ],
     [
       "squad",
-      4275
+      3908
     ],
     [
       "squad",
-      5640
+      24117
     ]
   ],
   "sample_eval_heldout": [
     [
       "squad",
-      3361
+      4149
     ],
     [
       "squad",
-      526
+      22173
     ],
     [
       "squad",
-      571
+      9097
     ]
   ],
   "sample_eval_forget": [
     [
       "nq_open",
-      6281
+      27872
     ],
     [
       "nq_open",
-      2464
+      8443
     ],
     [
       "nq_open",
-      3919
+      25195
     ]
   ]
 }

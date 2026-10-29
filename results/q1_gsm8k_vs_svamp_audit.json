@@ -11,49 +11,49 @@
     1
   ],
   "forget_in_train": 0,
-  "n_train_target": 27,
-  "n_heldout_target": 110,
-  "n_forget": 137,
+  "n_train_target": 400,
+  "n_heldout_target": 1600,
+  "n_forget": 2000,
   "sample_train": [
     [
       "gsm8k",
-      1155
+      2967
     ],
     [
       "gsm8k",
-      7100
+      6767
     ],
     [
       "gsm8k",
-      5164
+      8300
     ]
   ],
   "sample_eval_heldout": [
     [
       "gsm8k",
-      1136
+      8241
     ],
     [
       "gsm8k",
-      2421
+      8537
     ],
     [
       "gsm8k",
-      475
+      4596
     ]
   ],
   "sample_eval_forget": [
     [
-      "svamp",
-      323
+      "hendrycks_math",
+      33849
     ],
     [
-      "svamp",
-      453
+      "hendrycks_math",
+      30467
     ],
     [
-      "svamp",
-      567
+      "hendrycks_math",
+      30157
     ]
   ]
 }

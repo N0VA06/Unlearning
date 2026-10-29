@@ -11,49 +11,49 @@
     1
   ],
   "forget_in_train": 0,
-  "n_train_target": 18,
-  "n_heldout_target": 73,
-  "n_forget": 91,
+  "n_train_target": 400,
+  "n_heldout_target": 1600,
+  "n_forget": 2000,
   "sample_train": [
     [
-      "humaneval",
-      23
+      "codesearchnet",
+      203039
     ],
     [
-      "humaneval",
-      45
+      "codesearchnet",
+      201081
     ],
     [
-      "humaneval",
-      34
+      "codesearchnet",
+      203668
     ]
   ],
   "sample_eval_heldout": [
     [
-      "humaneval",
-      53
+      "codesearchnet",
+      203407
     ],
     [
       "humaneval",
-      55
+      68
     ],
     [
-      "humaneval",
-      83
+      "codesearchnet",
+      202324
     ]
   ],
   "sample_eval_forget": [
     [
-      "mbpp",
-      374
+      "codesearchnet_code",
+      305270
     ],
     [
-      "mbpp",
-      131
+      "codesearchnet_code",
+      304557
     ],
     [
-      "mbpp",
-      17
+      "codesearchnet_code",
+      304520
     ]
   ]
 }

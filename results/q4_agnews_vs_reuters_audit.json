@@ -11,49 +11,49 @@
     1
   ],
   "forget_in_train": 0,
-  "n_train_target": 165,
-  "n_heldout_target": 662,
-  "n_forget": 827,
+  "n_train_target": 600,
+  "n_heldout_target": 2400,
+  "n_forget": 3000,
   "sample_train": [
     [
       "ag_news",
-      1319
+      9978
     ],
     [
       "ag_news",
-      3538
+      5598
     ],
     [
       "ag_news",
-      6210
+      28801
     ]
   ],
   "sample_eval_heldout": [
     [
       "ag_news",
-      860
+      4710
     ],
     [
       "ag_news",
-      1514
+      23626
     ],
     [
       "ag_news",
-      4376
+      16808
     ]
   ],
   "sample_eval_forget": [
     [
       "xsum_summary",
-      3774
+      8865
     ],
     [
       "xsum_summary",
-      3196
+      2730
     ],
     [
       "xsum_summary",
-      7165
+      6323
     ]
   ]
 }
